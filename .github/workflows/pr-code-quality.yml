@@ -1,0 +1,386 @@
+name: PR Code Quality Check
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+jobs:
+  code-quality:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Get changed files
+        id: changed-files
+        uses: tj-actions/changed-files@v41
+        with:
+          files: |
+            **/*.ts
+            **/*.tsx
+          files_ignore: |
+            **/*.test.ts
+            **/*.test.tsx
+            **/*.spec.ts
+            **/*.spec.tsx
+
+      - name: Set default outputs when no TS files changed
+        if: steps.changed-files.outputs.any_changed != 'true'
+        run: |
+          echo "No TypeScript files changed, setting default outputs"
+          echo "has_errors=false" >> $GITHUB_OUTPUT
+        id: eslint-default
+
+      - name: Set default TypeScript outputs when no TS files changed
+        if: steps.changed-files.outputs.any_changed != 'true'
+        run: |
+          echo "No TypeScript files changed, setting default outputs"
+          echo "has_errors_in_changed=false" >> $GITHUB_OUTPUT
+          echo "has_errors_in_other=false" >> $GITHUB_OUTPUT
+        id: typescript-default
+
+      - name: Run ESLint on changed files
+        id: eslint
+        if: steps.changed-files.outputs.any_changed == 'true'
+        continue-on-error: true
+        run: |
+          echo "Running ESLint on changed files..."
+          FILES="${{ steps.changed-files.outputs.all_changed_files }}"
+
+          touch eslint-errors.txt
+
+          if [ -n "$FILES" ]; then
+            if npx eslint $FILES --format stylish --max-warnings=0 > eslint-errors.txt 2>&1; then
+              echo "has_errors=false" >> $GITHUB_OUTPUT
+            else
+              echo "has_errors=true" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "has_errors=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run TypeScript check on all files
+        id: typescript-full
+        continue-on-error: true
+        run: |
+          echo "Running full TypeScript check..."
+
+          touch ts-errors-full.txt
+          npx tsc -b > ts-errors-full.txt 2>&1 || true
+
+          if grep -q "error TS" ts-errors-full.txt; then
+            echo "has_errors=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_errors=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Filter TypeScript errors with Node
+        id: typescript-changed
+        if: steps.typescript-full.outputs.has_errors == 'true' && steps.changed-files.outputs.any_changed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+
+            const normalize = p => p.replace(/^\.\//, '').trim();
+
+            const changedFilesRaw = `${{ steps.changed-files.outputs.all_changed_files }}`;
+            const changedFiles = new Set(
+              changedFilesRaw.split(' ').map(normalize).filter(Boolean)
+            );
+
+            let fullOutput = '';
+            try {
+              fullOutput = fs.readFileSync('ts-errors-full.txt', 'utf8');
+            } catch (e) {
+              console.log('No ts-errors-full.txt found');
+              core.setOutput('has_errors_in_changed', 'false');
+              core.setOutput('has_errors_in_other', 'false');
+              return;
+            }
+
+            const lines = fullOutput.split('\n');
+            let changedErrorsContent = '';
+            let otherErrorsContent = '';
+            let hasErrorsInChanged = false;
+            let hasErrorsInOther = false;
+
+            for (const line of lines) {
+              if (!line.trim()) continue;
+
+              const match = line.match(/^(.+?):(\d+):(\d+)\s-\serror\sTS/);
+              
+              if (match) {
+                const filename = normalize(match[1]);
+                if (changedFiles.has(filename)) {
+                  changedErrorsContent += line + '\n';
+                  hasErrorsInChanged = true;
+                } else {
+                  otherErrorsContent += line + '\n';
+                  hasErrorsInOther = true;
+                }
+              } else if (line.includes('error TS')) {                
+                otherErrorsContent += line + '\n';
+                hasErrorsInOther = true;
+              }
+            }
+
+            fs.writeFileSync('ts-errors-changed.txt', changedErrorsContent);
+            fs.writeFileSync('ts-errors-other.txt', otherErrorsContent);
+
+            core.setOutput('has_errors_in_changed', hasErrorsInChanged ? 'true' : 'false');
+            core.setOutput('has_errors_in_other', hasErrorsInOther ? 'true' : 'false');
+
+      - name: Create PR comment with blocking errors
+        if: |
+          steps.changed-files.outputs.any_changed == 'true' &&
+          (steps.eslint.outputs.has_errors == 'true' || 
+           steps.typescript-changed.outputs.has_errors_in_changed == 'true')
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+
+            let eslintErrors = '';
+            let tsChangedErrors = '';
+            let tsOtherErrors = '';
+
+            try {
+              eslintErrors = fs.readFileSync('eslint-errors.txt', 'utf8');
+            } catch (e) {}
+
+            try {
+              tsChangedErrors = fs.readFileSync('ts-errors-changed.txt', 'utf8');
+            } catch (e) {}
+
+            try {
+              tsOtherErrors = fs.readFileSync('ts-errors-other.txt', 'utf8');
+            } catch (e) {}
+
+            const maxLength = 60000;
+            if (eslintErrors.length > maxLength) {
+              eslintErrors = eslintErrors.substring(0, maxLength) + '\n\n... (output truncated)';
+            }
+            if (tsChangedErrors.length > maxLength) {
+              tsChangedErrors = tsChangedErrors.substring(0, maxLength) + '\n\n... (output truncated)';
+            }
+            if (tsOtherErrors.length > maxLength) {
+              tsOtherErrors = tsOtherErrors.substring(0, maxLength) + '\n\n... (output truncated)';
+            }
+
+            let commentBody = '## ❌ Code Quality Check Failed\n\n';
+            commentBody += '**These errors are blocking the merge:**\n\n';
+
+            if (eslintErrors) {
+              commentBody += '### ESLint Errors (in changed files)\n\n```\n' + eslintErrors + '\n```\n\n';
+            }
+
+            if (tsChangedErrors) {
+              commentBody += '### TypeScript Errors (in changed files)\n\n```\n' + tsChangedErrors + '\n```\n\n';
+            }
+
+            if (tsOtherErrors) {
+              commentBody += '---\n\n';
+              commentBody += '### ⚠️ TypeScript Errors in Other Files (not blocking)\n\n';
+              commentBody += '*These errors exist in files you didn\'t modify. They won\'t block this PR, but consider fixing them.*\n\n';
+              commentBody += '<details>\n<summary>Click to see errors</summary>\n\n```\n' + tsOtherErrors + '\n```\n\n</details>\n\n';
+            }
+
+            commentBody += '---\n';
+            commentBody += '*Please fix the blocking errors before merging.*';
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(comment => 
+              comment.user.type === 'Bot' && 
+              comment.body.includes('Code Quality Check')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: commentBody
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: commentBody
+              });
+            }
+
+      - name: Create warning comment for other TypeScript errors
+        if: |
+          steps.changed-files.outputs.any_changed == 'true' &&
+          steps.eslint.outputs.has_errors != 'true' && 
+          steps.typescript-changed.outputs.has_errors_in_changed != 'true' &&
+          steps.typescript-changed.outputs.has_errors_in_other == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+
+            let tsOtherErrors = '';
+
+            try {
+              tsOtherErrors = fs.readFileSync('ts-errors-other.txt', 'utf8');
+            } catch (e) {}
+
+            const maxLength = 60000;
+            if (tsOtherErrors.length > maxLength) {
+              tsOtherErrors = tsOtherErrors.substring(0, maxLength) + '\n\n... (output truncated)';
+            }
+
+            let commentBody = '## ✅ Code Quality Check Passed (with warnings)\n\n';
+            commentBody += 'Your changes have no ESLint or TypeScript errors! ✨\n\n';
+            commentBody += '---\n\n';
+            commentBody += '### ⚠️ TypeScript Errors in Other Files (not blocking)\n\n';
+            commentBody += '*These errors exist in files you didn\'t modify. Consider fixing them in a future PR.*\n\n';
+            commentBody += '<details>\n<summary>Click to see errors</summary>\n\n```\n' + tsOtherErrors + '\n```\n\n</details>';
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(comment => 
+              comment.user.type === 'Bot' && 
+              comment.body.includes('Code Quality Check')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: commentBody
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: commentBody
+              });
+            }
+
+      - name: Create success comment
+        if: |
+          steps.changed-files.outputs.any_changed == 'true' &&
+          steps.eslint.outputs.has_errors != 'true' &&
+          steps.typescript-full.outputs.has_errors != 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const commentBody = '## ✅ Code Quality Check Passed\n\n' +
+                                'No ESLint or TypeScript errors found! Great work! 🎉';
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(comment => 
+              comment.user.type === 'Bot' && 
+              comment.body.includes('Code Quality Check')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: commentBody
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: commentBody
+              });
+            }
+
+      - name: Create success comment for non-TS changes
+        if: steps.changed-files.outputs.any_changed != 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const commentBody = '## ✅ Code Quality Check Passed\n\n' +
+                                'No TypeScript or TSX files were modified in this PR.\n\n' +
+                                '_ESLint and TypeScript checks were not required._';
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(comment => 
+              comment.user.type === 'Bot' && 
+              comment.body.includes('Code Quality Check')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: commentBody
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: commentBody
+              });
+            }
+
+      - name: Fail if blocking errors found
+        if: always()
+        run: |
+          ESLINT="${{ steps.eslint.outputs.has_errors }}"
+          TS_CHANGED="${{ steps.typescript-changed.outputs.has_errors_in_changed }}"
+
+          ESLINT="${ESLINT:-false}"
+          TS_CHANGED="${TS_CHANGED:-false}"
+
+          echo "Debug: ESLint=$ESLINT, TS_Changed=$TS_CHANGED"
+
+          if [ "$ESLINT" = "true" ] || [ "$TS_CHANGED" = "true" ]; then
+            echo "❌ Code quality check failed due to errors in changed files."
+            exit 1
+          fi
+
+          echo "✅ No blocking errors found."
