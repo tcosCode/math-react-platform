@@ -83,7 +83,7 @@ jobs:
           echo "Running full TypeScript check..."
 
           touch ts-errors-full.txt
-          npx tsc -b > ts-errors-full.txt 2>&1 || true
+          npx tsc --noEmit -p tsconfig.json > ts-errors-full.txt 2>&1 || true
 
           if grep -q "error TS" ts-errors-full.txt; then
             echo "has_errors=true" >> $GITHUB_OUTPUT
