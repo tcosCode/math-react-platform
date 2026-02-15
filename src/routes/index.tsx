@@ -16,6 +16,9 @@ const DashboardPage = lazy(
 const ExercisesPage = lazy(
   () => import('@/features/exercises/pages/ExercisesPage'),
 );
+const VideoclasesPage = lazy(
+  () => import('@/features/videoclases/pages/VideoclasesPage'),
+);
 
 export const AppRoutes = () => {
   return (
@@ -30,6 +33,7 @@ export const AppRoutes = () => {
         <Route element={<PrivateRoute />}>
           <Route path="/dashboard" element={<DashboardPage />} />
           <Route path="/exercises" element={<ExercisesPage />} />
+          <Route path="/videoclases" element={<VideoclasesPage />} />
           {/* Add more private routes here */}
         </Route>
 
