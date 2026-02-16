@@ -30,6 +30,7 @@ export const AppRoutes = () => {
         <Route element={<PrivateRoute />}>
           <Route path="/dashboard" element={<DashboardPage />} />
           <Route path="/exercises" element={<ExercisesPage />} />
+          <Route path="/videoclases" element={<ExercisesPage />} />
           {/* Add more private routes here */}
         </Route>
 
