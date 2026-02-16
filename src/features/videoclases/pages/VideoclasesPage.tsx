@@ -3,11 +3,11 @@ import Typography from '@mui/material/Typography';
 const VideoclasesPage = () => {
   return (
     <>
-      <Typography variant="h4" gutterBottom>
+      <Typograph variant="h4" gutterBottom>
         Videoclases
-      </Typography>
+      </Typograph>
       <Typography variant="body1">
-        Aquí aparecerá la lista de videoclases.
+        Aquí aparecerá la lista de videoclases de los ejercicios.
       </Typography>
     </>
   );
